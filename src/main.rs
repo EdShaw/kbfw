@@ -5,7 +5,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use defmt::*;
+use defmt::{debug, error, info, unreachable};
 use embassy_executor::Spawner;
 use embassy_futures::select::select_slice;
 use embassy_rp::bind_interrupts;
@@ -18,6 +18,7 @@ use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::usb;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Ticker};
+use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::class::hid::{
     HidReaderWriter, ReportId as HidReportId, RequestHandler as HidRequestHandler,
     State as HidState,
@@ -28,7 +29,7 @@ use futures::pin_mut;
 use kbfw_embassy::keycode::KeyCode;
 use smart_leds::RGB8;
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
-use {defmt_rtt as _, panic_probe as _};
+use {defmtusb as _, panic_probe as _};
 
 use kbfw_embassy::matrix::Matrix;
 
@@ -81,7 +82,8 @@ async fn main(_spawner: Spawner) {
     let mut request_handler = MyRequestHandler {};
     let mut device_handler = MyDeviceHandler::new();
 
-    let mut state = HidState::new();
+    let mut hid_state = HidState::new();
+    let mut logger_state = embassy_usb::class::cdc_acm::State::new();
     let mut builder = UsbBuilder::new(
         driver,
         config,
@@ -100,7 +102,14 @@ async fn main(_spawner: Spawner) {
         poll_ms: 60,
         max_packet_size: 64,
     };
-    let hid = HidReaderWriter::<_, 1, 8>::new(&mut builder, &mut state, config);
+    let hid = HidReaderWriter::<_, 1, 8>::new(&mut builder, &mut hid_state, config);
+
+    let logger_class = CdcAcmClass::new(&mut builder, &mut logger_state, 64);
+    let usb_log = async {
+        defmtusb::logger(logger_class.split().0, 64).await;
+
+        crate::unreachable!()
+    };
 
     // Build the builder.
     let mut usb = builder.build();
@@ -125,7 +134,11 @@ async fn main(_spawner: Spawner) {
         embassy_rp::gpio::Pin::degrade(p.PIN_27),
         embassy_rp::gpio::Pin::degrade(p.PIN_26),
     ]
-    .map(|in_pin| Input::new(AnyPin::from(in_pin), embassy_rp::gpio::Pull::Down));
+    .map(|in_pin| {
+        let mut in_pin = Input::new(AnyPin::from(in_pin), embassy_rp::gpio::Pull::Down);
+        in_pin.set_schmitt(true);
+        in_pin
+    });
     let matrix_outputs = [
         embassy_rp::gpio::Pin::degrade(p.PIN_22),
         embassy_rp::gpio::Pin::degrade(p.PIN_7),
@@ -156,7 +169,7 @@ async fn main(_spawner: Spawner) {
             info!("Writing report: {} {}", report.modifier, report.keycodes);
             match writer.write_serialize(&report).await {
                 Ok(()) => {}
-                Err(e) => warn!("Failed to send report: {:?}", e),
+                Err(e) => error!("Failed to send report: {:?}", e),
             };
         }
     };
@@ -181,7 +194,6 @@ async fn main(_spawner: Spawner) {
         let mut ticker = Ticker::every(Duration::from_millis(10));
         loop {
             for j in 0..(256 * 5) {
-                debug!("New Colors:");
                 for i in 0..NUM_LEDS {
                     data[i] =
                         wheel((((i * 256) as u16 / NUM_LEDS as u16 + j as u16) & 255) as u8) / 32;
@@ -196,12 +208,19 @@ async fn main(_spawner: Spawner) {
 
     // Run everything concurrently.
     pin_mut!(usb_fut);
+    pin_mut!(usb_log);
     pin_mut!(scan_matrix);
     pin_mut!(report_writer);
     pin_mut!(report_reader);
     pin_mut!(led_fut);
-    let futures: [Pin<&mut dyn Future<Output = _>>; 5] =
-        [usb_fut, scan_matrix, report_writer, report_reader, led_fut];
+    let futures: [Pin<&mut dyn Future<Output = _>>; 6] = [
+        usb_fut,
+        usb_log,
+        scan_matrix,
+        report_writer,
+        report_reader,
+        led_fut,
+    ];
     pin_mut!(futures);
     match select_slice(futures).await {}
 }
@@ -301,14 +320,14 @@ fn unregister_key(r: &mut KeyboardReport, key: KeyCode) {
 }
 
 fn register_keycode(r: &mut KeyboardReport, key: KeyCode) {
-    if let Some(k) = r.keycodes.iter_mut().find(|k| **k == 0) {
+    if let Some(k) = r.keycodes.iter_mut().find(|k| **k == KeyCode::None as u8) {
         *k = key as u8;
     }
 }
 
 fn unregister_keycode(r: &mut KeyboardReport, key: KeyCode) {
     if let Some(k) = r.keycodes.iter_mut().find(|k| **k == key as u8) {
-        *k = key as u8;
+        *k = KeyCode::None as u8;
     }
 }
 

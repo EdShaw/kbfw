@@ -13,7 +13,7 @@ use embedded_hal_async::digital::Wait;
 
 #[derive(Copy, Clone, Debug, Format, Default)]
 pub struct KeyState {
-    pub(crate) pressed: bool,
+    pub(crate) high: bool,
 }
 
 #[derive(Copy, Clone, Debug, Format)]
@@ -59,7 +59,7 @@ where
         }
 
         loop {
-            self.wait_for_any_key().await;
+            // self.wait_for_any_key().await;
 
             'active: loop {
                 let mut sent = 0;
@@ -77,23 +77,26 @@ where
                     // TODO: Debounce
 
                     for (in_idx, high) in row.iter().cloned().enumerate() {
-                        event_channel
-                            .send(KeyEvent {
-                                // TODO: Remapping
-                                key: Self::mapping(out_idx, in_idx),
-                                pressed: high,
-                            })
-                            .await;
-                        sent += 1;
+                        if self.key_states[out_idx][in_idx].high != high {
+                            self.key_states[out_idx][in_idx].high = high;
+                            event_channel
+                                .send(KeyEvent {
+                                    // TODO: Remapping
+                                    key: Self::mapping(out_idx, in_idx),
+                                    pressed: high,
+                                })
+                                .await;
+                            sent += 1;
+                        }
                     }
 
                     let Ok(()) = out_pin.set_low();
                 }
 
-                // Go idle
-                if sent == 0 {
-                    break 'active;
-                }
+                // // Go idle
+                // if sent == 0 {
+                //     break 'active;
+                // }
 
                 // TODO: Configurable
                 Timer::after_micros(1000).await;

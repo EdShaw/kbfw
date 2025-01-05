@@ -1,5 +1,3 @@
-use core::ops::RangeBounds;
-
 use defmt::Format;
 use num_enum::FromPrimitive;
 
