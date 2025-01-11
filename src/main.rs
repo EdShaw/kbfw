@@ -1,16 +1,19 @@
 #![no_std]
 #![no_main]
 
+mod matrix;
+mod usage;
+
 use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use defmt::{debug, error, info, unreachable};
+use defmt::{error, info, trace, unreachable};
 use embassy_executor::Spawner;
 use embassy_futures::select::select_slice;
 use embassy_rp::bind_interrupts;
 use embassy_rp::block::ImageDef;
-use embassy_rp::gpio::{AnyPin, Input, Output};
+use embassy_rp::gpio::Output;
 use embassy_rp::peripherals::{PIO0, USB};
 use embassy_rp::pio;
 use embassy_rp::pio::Pio;
@@ -26,12 +29,12 @@ use embassy_usb::class::hid::{
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder as UsbBuilder, Handler as UsbHandler};
 use futures::pin_mut;
-use kbfw_embassy::keycode::KeyCode;
 use smart_leds::RGB8;
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 use {defmtusb as _, panic_probe as _};
 
-use kbfw_embassy::matrix::Matrix;
+use crate::matrix::{Matrix, MatrixOffset};
+use crate::usage::{key_to_usage, register_usage, unregister_usage};
 
 #[link_section = ".start_block"]
 #[used]
@@ -107,7 +110,6 @@ async fn main(_spawner: Spawner) {
     let logger_class = CdcAcmClass::new(&mut builder, &mut logger_state, 64);
     let usb_log = async {
         defmtusb::logger(logger_class.split().0, 64).await;
-
         crate::unreachable!()
     };
 
@@ -129,16 +131,11 @@ async fn main(_spawner: Spawner) {
     let key_event_channel = Channel::new();
 
     let matrix_inputs = [
-        embassy_rp::gpio::Pin::degrade(p.PIN_29),
-        embassy_rp::gpio::Pin::degrade(p.PIN_28),
-        embassy_rp::gpio::Pin::degrade(p.PIN_27),
-        embassy_rp::gpio::Pin::degrade(p.PIN_26),
-    ]
-    .map(|in_pin| {
-        let mut in_pin = Input::new(AnyPin::from(in_pin), embassy_rp::gpio::Pull::Down);
-        in_pin.set_schmitt(true);
-        in_pin
-    });
+        embassy_rp::gpio::Flex::new(p.PIN_29),
+        embassy_rp::gpio::Flex::new(p.PIN_28),
+        embassy_rp::gpio::Flex::new(p.PIN_27),
+        embassy_rp::gpio::Flex::new(p.PIN_26),
+    ];
     let matrix_outputs = [
         embassy_rp::gpio::Pin::degrade(p.PIN_22),
         embassy_rp::gpio::Pin::degrade(p.PIN_7),
@@ -147,23 +144,28 @@ async fn main(_spawner: Spawner) {
         embassy_rp::gpio::Pin::degrade(p.PIN_4),
     ]
     .map(|out_pin| Output::new(out_pin, embassy_rp::gpio::Level::Low));
-    let mut matrix = Matrix::new(matrix_inputs, matrix_outputs);
+    let matrix_mapping = MatrixOffset::<0> {};
+    let mut matrix = Matrix::new(matrix_inputs, matrix_outputs, matrix_mapping);
     let scan_matrix = matrix.scan(key_event_channel.sender());
 
     // Do stuff with the class!
     let mut report = KeyboardReport::default();
+    register_usage(
+        &mut report,
+        usage::Usage::Keyboard(usage::KeyboardUsage::KeypadNumLock),
+    );
     let report_writer = async {
         loop {
             info!("Waiting for key event");
             let ev = key_event_channel.receive().await;
             info!("Got key event: {}", ev);
 
-            // TODO KEYMAP
-            let keycode = KeyCode::KeyF;
-            if ev.pressed {
-                register_key(&mut report, keycode);
-            } else {
-                unregister_key(&mut report, keycode)
+            if let Some(usage) = key_to_usage(ev.key) {
+                if ev.pressed {
+                    register_usage(&mut report, usage);
+                } else {
+                    unregister_usage(&mut report, usage)
+                }
             }
 
             info!("Writing report: {} {}", report.modifier, report.keycodes);
@@ -182,8 +184,6 @@ async fn main(_spawner: Spawner) {
         mut common, sm0, ..
     } = Pio::new(p.PIO0, Irqs);
 
-    // This is the number of leds in the string. Helpfully, the sparkfun thing plus and adafruit
-    // feather boards for the 2040 both have one built in.
     const NUM_LEDS: usize = 1;
     let mut data = [RGB8::default(); NUM_LEDS];
 
@@ -197,7 +197,7 @@ async fn main(_spawner: Spawner) {
                 for i in 0..NUM_LEDS {
                     data[i] =
                         wheel((((i * 256) as u16 / NUM_LEDS as u16 + j as u16) & 255) as u8) / 32;
-                    debug!("R: {} G: {} B: {}", data[i].r, data[i].g, data[i].b);
+                    trace!("R: {} G: {} B: {}", data[i].r, data[i].g, data[i].b);
                 }
                 ws2812.write(&data).await;
 
@@ -301,40 +301,4 @@ impl UsbHandler for MyDeviceHandler {
             info!("Device is no longer configured, the Vbus current limit is 100mA.");
         }
     }
-}
-
-fn register_key(r: &mut KeyboardReport, key: KeyCode) {
-    if key.is_modifier() {
-        register_modifier(r, key.as_modifier_mask());
-    } else if key.is_basic() {
-        register_keycode(r, key);
-    }
-}
-
-fn unregister_key(r: &mut KeyboardReport, key: KeyCode) {
-    if key.is_modifier() {
-        unregister_modifier(r, key.as_modifier_mask());
-    } else if key.is_basic() {
-        unregister_keycode(r, key);
-    }
-}
-
-fn register_keycode(r: &mut KeyboardReport, key: KeyCode) {
-    if let Some(k) = r.keycodes.iter_mut().find(|k| **k == KeyCode::None as u8) {
-        *k = key as u8;
-    }
-}
-
-fn unregister_keycode(r: &mut KeyboardReport, key: KeyCode) {
-    if let Some(k) = r.keycodes.iter_mut().find(|k| **k == key as u8) {
-        *k = KeyCode::None as u8;
-    }
-}
-
-fn register_modifier(r: &mut KeyboardReport, modifier_mask: u8) {
-    r.modifier |= modifier_mask;
-}
-
-fn unregister_modifier(r: &mut KeyboardReport, modifier_mask: u8) {
-    r.modifier &= !modifier_mask;
 }
