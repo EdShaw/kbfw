@@ -479,7 +479,7 @@ impl KeyboardUsage {
 pub(crate) fn key_to_usage(key: u16) -> Option<Usage> {
     'keyboard: {
         return Some(Usage::Keyboard(match key {
-            // 0 unused
+            // 0 unused (missing)
             1 => KeyboardUsage::KeypadDivide,
             2 => KeyboardUsage::KeypadMultiply,
             3 => KeyboardUsage::KeypadEqual,
@@ -496,9 +496,9 @@ pub(crate) fn key_to_usage(key: u16) -> Option<Usage> {
             14 => KeyboardUsage::Keypad3PageDown,
             15 => KeyboardUsage::KeypadEnter,
             16 => KeyboardUsage::Keypad0Insert,
-            17 => KeyboardUsage::Keypad0Insert,
+            // 17 unused (overlaps Keypad0Insert)
             18 => KeyboardUsage::KeypadPeriodDelete,
-            19 => KeyboardUsage::KeypadEnter,
+            // 19 unused (overlaps KeypadEnter)
             _ => break 'keyboard,
         }));
     };
